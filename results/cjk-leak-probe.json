@@ -1,0 +1,47 @@
+[
+  {
+    "label": "default (t1.0/p0.95)",
+    "answers_with_cjk": 0,
+    "prompts": 8,
+    "cjk_chars": 0,
+    "cjk_per_10k_chars": 0.0,
+    "cjk_chars_in_reasoning": 0,
+    "examples": []
+  },
+  {
+    "label": "t0.6/p0.9",
+    "answers_with_cjk": 0,
+    "prompts": 8,
+    "cjk_chars": 0,
+    "cjk_per_10k_chars": 0.0,
+    "cjk_chars_in_reasoning": 0,
+    "examples": []
+  },
+  {
+    "label": "t0.6/p0.9/top_k40",
+    "answers_with_cjk": 0,
+    "prompts": 8,
+    "cjk_chars": 0,
+    "cjk_per_10k_chars": 0.0,
+    "cjk_chars_in_reasoning": 0,
+    "examples": []
+  },
+  {
+    "label": "system-prompt t1.0",
+    "answers_with_cjk": 0,
+    "prompts": 8,
+    "cjk_chars": 0,
+    "cjk_per_10k_chars": 0.0,
+    "cjk_chars_in_reasoning": 0,
+    "examples": []
+  },
+  {
+    "label": "system-prompt t0.6/p0.9",
+    "answers_with_cjk": 0,
+    "prompts": 8,
+    "cjk_chars": 0,
+    "cjk_per_10k_chars": 0.0,
+    "cjk_chars_in_reasoning": 0,
+    "examples": []
+  }
+]
