@@ -25,6 +25,7 @@ overlay files; this repo adds:
 | `scripts/pad-config.py` | On-disk `config.json` pad: 66 heads / **2112** MoE I (upstream writes 2049 — mismatch) |
 | `scripts/fetch-weights.sh` | Weights + the `chat_template.jinja` that weight-only downloaders skip |
 | `scripts/ship-image.sh` | `docker save \| ssh docker load` to peers |
+| `scripts/pad-dflash2-drafter.py` | **DFlash2 at TP=3**: head-pads the drafter 32/8 -> 48/12 |
 | `tests/` | tok/s, long-context needle, CJK-leak probe |
 
 ## Requirements
@@ -84,6 +85,31 @@ curl http://<rank0>:8045/v1/chat/completions -H 'Content-Type: application/json'
 
 `reasoning` and `content` come back as separate fields. Give `max_tokens` room: this model
 **always** thinks, and there is no way to turn that off (see gotchas).
+
+## DFlash2 speculative decoding (optional)
+
+47.2 tok/s thinking-on, **+28%** over MTP-3 on this fleet, with the pool at 1,366,425
+tokens (2.61x). Needs the `sm121-v12-dflash2` image and one extra step, because nothing
+about the drafter divides by three either:
+
+```bash
+# 32 q / 8 kv heads -> 48 q / 12 kv, zero-padded; verifies numerically before writing
+scripts/pad-dflash2-drafter.py ~/glm53-dflash2-draft ~/glm53-dflash2-draft-tp3
+```
+
+Then set `SPEC_METHOD=dflash` and `DFLASH2_DIR` in `cluster.env` (see
+`cluster.env.example`). Two traps worth knowing before you try a different pad:
+
+- `draft_tensor_parallel_size=1` does **not** let the drafter escape sharding.
+  `load_dflash_model()` builds the draft under the *target's* parallel config and never
+  applies `draft_parallel_config` — the setting is silently ignored.
+- 36 q / 9 kv also divides by 3 and also keeps the GQA ratio, but lands the drafter on the
+  standalone KV path, where it keeps `block_size=16` and one 512K request wants 33.6 GiB.
+  48/12 hits exact page fit at block 2304 and wants 3.2 GiB.
+
+Check `/metrics` after: acceptance should be 0.4–0.9 depending on how predictable the
+output is. Near 0.15 means the aux-hidden-state capture is wrong — it degrades silently
+rather than crashing. Full writeup: [results/dflash2-tp3-2026-08-28.md](results/dflash2-tp3-2026-08-28.md).
 
 ## Verify
 

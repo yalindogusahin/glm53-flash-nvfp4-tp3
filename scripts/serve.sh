@@ -44,6 +44,15 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8_e4m3}"
 KV_CACHE_MEMORY="${KV_CACHE_MEMORY:-}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 MTP_TOKENS="${MTP_TOKENS:-4}"
+# Speculation method: mtp (native head) | dflash (DFlash2 block-diffusion drafter) | none
+SPEC_METHOD="${SPEC_METHOD:-mtp}"
+DFLASH2_DIR="${DFLASH2_DIR:-$HOME/glm53-dflash2-draft}"
+DFLASH2_MNT="${DFLASH2_MNT:-/models/dflash2-draft}"
+# block_size 8 minus the target's own verified token; 8 drafts a position the model never learned.
+DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
+# The drafter is 32 heads / 8 KV heads - neither divides by 3, so it cannot shard at TP=3.
+# vLLM allows only 1 or target TP; 1 replicates the 2.3 GiB drafter per rank.
+DRAFT_TP="${DRAFT_TP:-1}"
 ENABLE_EP="${ENABLE_EP:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 REASONING_PARSER="${REASONING_PARSER:-glm47}"
@@ -87,7 +96,17 @@ HEADLESS=""
 
 OPT=()
 [ -n "$KV_CACHE_MEMORY" ] && OPT+=(--kv-cache-memory "$KV_CACHE_MEMORY")
-[ "$MTP_TOKENS" != "0" ] && OPT+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
+case "$SPEC_METHOD" in
+mtp)
+	[ "$MTP_TOKENS" != "0" ] && OPT+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
+	;;
+dflash)
+	test -f "$DFLASH2_DIR/config.json" || { echo "no DFlash2 drafter at $DFLASH2_DIR" >&2; exit 2; }
+	OPT+=(--speculative-config "{\"method\":\"dflash\",\"model\":\"${DFLASH2_MNT}\",\"num_speculative_tokens\":${DFLASH_TOKENS},\"draft_tensor_parallel_size\":${DRAFT_TP}}")
+	;;
+none) ;;
+*) echo "SPEC_METHOD must be mtp|dflash|none" >&2; exit 2 ;;
+esac
 [ "$ENABLE_EP" = "1" ] && OPT+=(--enable-expert-parallel)
 [ "$ENFORCE_EAGER" = "1" ] && OPT+=(--enforce-eager)
 
@@ -148,21 +167,47 @@ socket)
 esac
 
 VLLM=/usr/local/lib/python3.12/dist-packages/vllm
+
+# The v12 image patches EAGLE3 aux-hidden-state capture INTO its own copy of
+# glm5next/nvidia/model.py, but this mount shadows that file with the TP=3 overlay copy --
+# which reverts it, and the engine dies at load with "Model does not support EAGLE3
+# interface". Mount a TP=3 copy carrying the same patch instead. Build it with:
+#   cp $UPSTREAM_DIR/overlay/vllm/models/glm5next/nvidia/model.py $OVERLAY_DIR/glm5next_model_dflash2.py
+#   python3 <overlay-dflash2>/patch_glm_aux_capture.py --model-file $OVERLAY_DIR/glm5next_model_dflash2.py
+GLM_MODEL_PY="$UPSTREAM_DIR/overlay/vllm/models/glm5next/nvidia/model.py"
+if [ "$SPEC_METHOD" = "dflash" ]; then
+	GLM_MODEL_PY="${DFLASH_MODEL_PY:-$OVERLAY_DIR/glm5next_model_dflash2.py}"
+	test -f "$GLM_MODEL_PY" || { echo "SPEC_METHOD=dflash needs the aux-capture model.py at $GLM_MODEL_PY (see comment in serve.sh)" >&2; exit 2; }
+fi
+
 MOUNTS=(
 	-v "$MODEL_DIR:$MODEL_MNT:ro"
 	-v "$CACHE_DIR:/cache"
-	-v "$UPSTREAM_DIR/overlay/vllm/models/glm5next/nvidia/model.py:$VLLM/models/glm5next/nvidia/model.py:ro"
+	-v "$GLM_MODEL_PY:$VLLM/models/glm5next/nvidia/model.py:ro"
 	-v "$UPSTREAM_DIR/overlay/vllm/model_executor/layers/vocab_parallel_embedding.py:$VLLM/model_executor/layers/vocab_parallel_embedding.py:ro"
 	-v "$UPSTREAM_DIR/overlay/vllm/model_executor/model_loader/weight_utils.py:$VLLM/model_executor/model_loader/weight_utils.py:ro"
 	-v "$UPSTREAM_DIR/overlay/vllm/model_executor/parameter.py:$VLLM/model_executor/parameter.py:ro"
 )
+[ "$SPEC_METHOD" = "dflash" ] && MOUNTS+=(-v "$DFLASH2_DIR:$DFLASH2_MNT:ro")
 # The GB10 sparse-indexer fallback: without it any request >~25K tokens kills the engine.
+# FlashInfer JIT-builds the cutlass fused-MoE kernels at warmup and includes <nvrtc.h>,
+# which ships only in the pip nvidia cu13 wheel. Mount that ONE header into nvcc's include
+# dir -- putting the whole wheel dir on CPATH shadows the CUDA runtime headers and breaks
+# nvcc's generated stubs with "__cudaLaunch was not declared in this scope".
+if [ -f "$OVERLAY_DIR/nvrtc.h" ]; then
+	MOUNTS+=(-v "$OVERLAY_DIR/nvrtc.h:/usr/local/cuda/include/nvrtc.h:ro")
+fi
 INDEXER_REL="vllm/model_executor/layers/sparse_attn_indexer_kpool.py"
 if [ -f "$OVERLAY_DIR/$INDEXER_REL" ]; then
 	MOUNTS+=(-v "$OVERLAY_DIR/$INDEXER_REL:$VLLM/model_executor/layers/sparse_attn_indexer_kpool.py:ro")
 else
 	echo "WARNING: no indexer overlay at $OVERLAY_DIR/$INDEXER_REL - contexts >~25K will kill the engine" >&2
 fi
+
+# Ad-hoc overlays for debugging, e.g.
+#   EXTRA_MOUNTS="-v /tmp/kv_cache_utils_debug.py:$VLLM/v1/core/kv_cache_utils.py:ro"
+[ -n "${EXTRA_MOUNTS:-}" ] && read -r -a xmnt <<<"$EXTRA_MOUNTS" && MOUNTS+=("${xmnt[@]}")
+[ -n "${EXTRA_ENV:-}" ] && read -r -a xenv <<<"$EXTRA_ENV" && NCCL_ENV+=("${xenv[@]}")
 
 ARGS=(
 	--gpus all -d --name "$NAME" --restart no
