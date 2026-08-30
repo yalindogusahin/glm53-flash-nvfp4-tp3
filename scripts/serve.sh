@@ -50,9 +50,11 @@ DFLASH2_DIR="${DFLASH2_DIR:-$HOME/glm53-dflash2-draft}"
 DFLASH2_MNT="${DFLASH2_MNT:-/models/dflash2-draft}"
 # block_size 8 minus the target's own verified token; 8 drafts a position the model never learned.
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
-# The drafter is 32 heads / 8 KV heads - neither divides by 3, so it cannot shard at TP=3.
-# vLLM allows only 1 or target TP; 1 replicates the 2.3 GiB drafter per rank.
-DRAFT_TP="${DRAFT_TP:-1}"
+# No draft_tensor_parallel_size: load_dflash_model() (v1/worker/gpu/spec_decode/dflash/
+# utils.py) builds the draft with replace(vllm_config, ...) and never applies
+# speculative_config.draft_parallel_config, so the key is silently ignored on the dflash
+# path -- the drafter always shards at TARGET TP. That is why the checkpoint must be
+# head-padded instead (scripts/pad-dflash2-drafter.py).
 ENABLE_EP="${ENABLE_EP:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
 REASONING_PARSER="${REASONING_PARSER:-glm47}"
@@ -102,7 +104,7 @@ mtp)
 	;;
 dflash)
 	test -f "$DFLASH2_DIR/config.json" || { echo "no DFlash2 drafter at $DFLASH2_DIR" >&2; exit 2; }
-	OPT+=(--speculative-config "{\"method\":\"dflash\",\"model\":\"${DFLASH2_MNT}\",\"num_speculative_tokens\":${DFLASH_TOKENS},\"draft_tensor_parallel_size\":${DRAFT_TP}}")
+	OPT+=(--speculative-config "{\"method\":\"dflash\",\"model\":\"${DFLASH2_MNT}\",\"num_speculative_tokens\":${DFLASH_TOKENS}}")
 	;;
 none) ;;
 *) echo "SPEC_METHOD must be mtp|dflash|none" >&2; exit 2 ;;

@@ -15,8 +15,9 @@ every request past ~25K tokens kills the engine on GB10. See [docs/GOTCHAS.md](d
 
 The delta on top of [FlyCockpit/GLM-5.3-Flash-3x-DGX-Sparks](https://github.com/FlyCockpit/GLM-5.3-Flash-3x-DGX-Sparks)
 (MIT, which in turn rebuilds [tonyd2wild](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-2x-DGX-Spark)'s
-SM121 patch ladder). You need that repo for the image Dockerfile and the four vLLM
-overlay files; this repo adds:
+SM121 patch ladder). You need that repo for the base TP=3 overlay files and v8 image
+recipe; this repo carries the DFlash2 v12 overlay needed to reproduce the PR result.
+This repo adds:
 
 | File | Purpose |
 | --- | --- |
@@ -26,6 +27,9 @@ overlay files; this repo adds:
 | `scripts/fetch-weights.sh` | Weights + the `chat_template.jinja` that weight-only downloaders skip |
 | `scripts/ship-image.sh` | `docker save \| ssh docker load` to peers |
 | `scripts/pad-dflash2-drafter.py` | **DFlash2 at TP=3**: head-pads the drafter 32/8 -> 48/12 |
+| `scripts/extract-nvrtc-header.sh` | Extracts `nvrtc.h` from the image's NVIDIA NVRTC wheel into the local overlay |
+| `docker/Dockerfile.glm53-sm121-v12-dflash2` | Reproducible DFlash2 v12 image build |
+| `docker/dflash2-overlay/` | DFlash2 model glue, aux capture, registry/select, and KV drafter-group patches |
 | `tests/` | tok/s, long-context needle, CJK-leak probe |
 
 ## Requirements
@@ -46,7 +50,7 @@ git clone https://github.com/FlyCockpit/GLM-5.3-Flash-3x-DGX-Sparks ~/src/glm53-
 # 1. weights + chat template (rank 0 only if you share them; every node otherwise)
 ~/src/glm53-tp3/scripts/fetch-weights.sh /path/to/glm-5.3-flash-nvfp4
 
-# 2. build the image on one node (~50 min: 20.7 GB base pull + a FlashInfer nightly)
+# 2. build the base image on one node (~50 min: 20.7 GB base pull + a FlashInfer nightly)
 cd ~/src/glm53-upstream && docker build -f docker/Dockerfile.sm121-v8 -t glm53:sm121-v8 docker/
 ~/src/glm53-tp3/scripts/ship-image.sh glm53:sm121-v8 <peer1> <peer2>
 
@@ -89,16 +93,31 @@ curl http://<rank0>:8045/v1/chat/completions -H 'Content-Type: application/json'
 ## DFlash2 speculative decoding (optional)
 
 47.2 tok/s thinking-on, **+28%** over MTP-3 on this fleet, with the pool at 1,366,425
-tokens (2.61x). Needs the `sm121-v12-dflash2` image and one extra step, because nothing
-about the drafter divides by three either:
+tokens (2.61x). Build the DFlash2 v12 image from this branch, then prepare the two
+runtime overlays that are intentionally local machine state:
 
 ```bash
+# image v12 = sm121-v8 + DFlash2 registry/model glue + GLM aux capture + drafter KV grouping
+docker build -f docker/Dockerfile.glm53-sm121-v12-dflash2 -t glm53:sm121-v12-dflash2 .
+
+# FlashInfer JIT needs this header under /usr/local/cuda/include; extract it from
+# the NVIDIA CUDA NVRTC Python wheel installed in the image, do not commit the header.
+scripts/extract-nvrtc-header.sh glm53:sm121-v12-dflash2 ~/src/glm53-overlay
+
+# serve.sh bind-mounts the TP=3 GLM model overlay; for DFlash2 it must also carry
+# the aux-hidden-state capture patch baked into image v12.
+cp ~/src/glm53-upstream/overlay/vllm/models/glm5next/nvidia/model.py \
+  ~/src/glm53-overlay/glm5next_model_dflash2.py
+python3 docker/dflash2-overlay/patch_glm_aux_capture.py \
+  --model-file ~/src/glm53-overlay/glm5next_model_dflash2.py
+
 # 32 q / 8 kv heads -> 48 q / 12 kv, zero-padded; verifies numerically before writing
 scripts/pad-dflash2-drafter.py ~/glm53-dflash2-draft ~/glm53-dflash2-draft-tp3
 ```
 
-Then set `SPEC_METHOD=dflash` and `DFLASH2_DIR` in `cluster.env` (see
-`cluster.env.example`). Two traps worth knowing before you try a different pad:
+Then set `IMAGE=glm53:sm121-v12-dflash2`, `SPEC_METHOD=dflash`, and `DFLASH2_DIR`
+in `cluster.env` (see `cluster.env.example`). Two traps worth knowing before you try a
+different pad:
 
 - `draft_tensor_parallel_size=1` does **not** let the drafter escape sharding.
   `load_dflash_model()` builds the draft under the *target's* parallel config and never
