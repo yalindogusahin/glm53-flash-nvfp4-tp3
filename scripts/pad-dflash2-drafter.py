@@ -189,6 +189,19 @@ def main() -> int:
         json.dump(cfg, f, indent=2)
 
     save_file(dst_w, os.path.join(args.dst, "model.safetensors"), metadata={"format": "pt"})
+
+    # Do not leave the caller's umask to decide who may read the drafter. Run
+    # under sudo, root's 077 produces a 0600 model.safetensors next to a 0644
+    # config.json; the head still loads it locally while the root_squashed,
+    # read-only NFS ranks cannot open it, and vLLM surfaces that as
+    # FileNotFoundError nine minutes into the weight load. Match the modes the
+    # rest of the shelf uses.
+    os.chmod(args.dst, 0o755)
+    for entry in os.listdir(args.dst):
+        written = os.path.join(args.dst, entry)
+        if os.path.isfile(written):
+            os.chmod(written, 0o644)
+
     print(f"[pad] wrote {args.dst}: {PAD_Q_HEADS} q / {PAD_KV_HEADS} kv heads, TP={args.tp} OK")
     return 0
 

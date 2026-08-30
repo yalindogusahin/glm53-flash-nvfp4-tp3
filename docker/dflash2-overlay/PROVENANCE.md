@@ -46,6 +46,22 @@ Source: https://github.com/jetnet/glm53-flash-nvfp4-tp3/pull/1
 defaults to the `glm53:sm121-v8` this repo builds, instead of the contributor's
 third-party GHCR base.
 
+Two fixes to the PR's helper scripts, each found the hard way and each a
+candidate report back to the author:
+
+- `../../scripts/extract-nvrtc-header.sh` probed only the old
+  `nvidia/cuda_nvrtc/` wheel layout. Our image ships the header under
+  `nvidia/cu13/include/`, and because the script redirected straight at the
+  destination it left a **0-byte** `nvrtc.h` behind and exited quietly. Now it
+  globs both layouts, stages through a temp file, and refuses an empty or
+  non-`nvrtcResult` result.
+- `../../scripts/pad-dflash2-drafter.py` left output modes to the caller's
+  umask. Run under sudo that yields a 0600 root-owned `model.safetensors` next
+  to a 0644 `config.json`. The head loads it locally and every worker rank
+  fails, because the shelf reaches them as a read-only, root_squashed NFS
+  export - and vLLM reports an unreadable weight file as `FileNotFoundError`,
+  nine minutes into the load. It now chmods its output to 0755/0644.
+
 Deliberately NOT taken from PR #1: the default-checkpoint switch to
 `RedHatAI/GLM-5.3-Flash-NVFP4` (a `compressed-tensors` mixed-precision build with
 **quantized activations**, unlike the weight-only A16 ModelOpt checkpoint this
