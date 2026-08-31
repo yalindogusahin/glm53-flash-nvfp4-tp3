@@ -1,0 +1,19 @@
+# Base is a build ARG on purpose. The DFlash2 overlay this file applies came from
+# PR #1 by @yalindogusahin, whose Dockerfile pinned a third-party GHCR image that
+# merely shares the "sm121-v8" tag suffix with the image this repo tells you to
+# build. Those are different artifacts. Default to the locally built one so the
+# overlay lands on the vLLM tree this repo actually documents.
+ARG BASE_IMAGE=glm53:sm121-v8
+FROM ${BASE_IMAGE}
+ARG VLLM=/usr/local/lib/python3.12/dist-packages/vllm
+COPY docker/dflash2-overlay/qwen3_dflash2.py $VLLM/model_executor/models/qwen3_dflash2.py
+COPY docker/dflash2-overlay/dflash2/ $VLLM/v1/worker/gpu/spec_decode/dflash2/
+COPY docker/dflash2-overlay/patch_registry_and_select.py /tmp/patch_registry_and_select.py
+COPY docker/dflash2-overlay/patch_glm_aux_capture.py /tmp/patch_glm_aux_capture.py
+COPY docker/dflash2-overlay/patch_kv_page_lcm2.py /tmp/patch_kv_page_lcm2.py
+COPY docker/dflash2-overlay/patch_glm5_drafter_group.py /tmp/patch_glm5_drafter_group.py
+RUN python3 /tmp/patch_registry_and_select.py \
+    && python3 /tmp/patch_glm_aux_capture.py \
+    && python3 /tmp/patch_kv_page_lcm2.py \
+    && python3 /tmp/patch_glm5_drafter_group.py \
+    && python3 -c "from vllm.model_executor.models.registry import ModelRegistry; assert 'DFlash2DraftModel' in ModelRegistry.get_supported_archs(); print('v12 dflash2 build check OK')"
