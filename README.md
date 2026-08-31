@@ -126,9 +126,14 @@ different pad:
   standalone KV path, where it keeps `block_size=16` and one 512K request wants 33.6 GiB.
   48/12 hits exact page fit at block 2304 and wants 3.2 GiB.
 
-Check `/metrics` after: acceptance should be 0.4–0.9 depending on how predictable the
-output is. Near 0.15 means the aux-hidden-state capture is wrong — it degrades silently
-rather than crashing. Full writeup: [results/dflash2-tp3-2026-08-28.md](results/dflash2-tp3-2026-08-28.md).
+Check `/metrics` after. Acceptance is workload-dependent — with verified aux capture this
+lane measured 0.165–0.190 on Russian free prose, 0.181–0.188 on Russian agentic prose,
+0.964 on edits, 0.442 on short English code — so there is no universal threshold, and a
+low number on free prose is not a broken capture. Verify the aux-hidden-state capture
+with a fixed, known-predictable edit/code prompt instead: replay it and compare the
+per-position curve against the known-good acceptance 0.91, per-pos 14/13/13/13/13/12/11
+of 14. A wrong capture shows up on that prompt as a flat, near-zero curve — it degrades
+silently rather than crashing. Full writeup: [results/dflash2-tp3-2026-08-28.md](results/dflash2-tp3-2026-08-28.md).
 
 ## Verify
 

@@ -103,7 +103,27 @@ mtp)
 	[ "$MTP_TOKENS" != "0" ] && OPT+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}")
 	;;
 dflash)
-	test -f "$DFLASH2_DIR/config.json" || { echo "no DFlash2 drafter at $DFLASH2_DIR" >&2; exit 2; }
+	test -r "$DFLASH2_DIR/config.json" || { echo "no readable DFlash2 drafter config at $DFLASH2_DIR/config.json" >&2; exit 2; }
+	# A present 0644 config is not a working drafter: root-owned 0600 *.safetensors only
+	# fails 9.5 min into each load, as FileNotFoundError, on root-squashed NFS workers.
+	shopt -s nullglob
+	draft_ts=("$DFLASH2_DIR"/*.safetensors)
+	shopt -u nullglob
+	[ "${#draft_ts[@]}" -gt 0 ] && [ -r "${draft_ts[0]}" ] || { echo "no readable *.safetensors in $DFLASH2_DIR (readable on rank 0 but not on root-squashed NFS workers)" >&2; exit 2; }
+	# Verify the checkpoint IS the proven TP=3 pad, not merely present: unpadded 32/8
+	# dies at load, the tempting 36/9 pad boots then demands ~20 GiB per 512K request.
+	python3 - "$DFLASH2_DIR/config.json" <<-'PY'
+		import json, sys
+		cfg = json.load(open(sys.argv[1]))
+		q, kv = cfg["num_attention_heads"], cfg["num_key_value_heads"]
+		if (q, kv) != (48, 12):
+		    sys.exit(f"drafter is not the TP=3 pad 48/12 (got {q}q/{kv}kv); run scripts/pad-dflash2-drafter.py")
+	PY
+	# A missing/empty/stale nvrtc.h defers the failure to FlashInfer JIT warmup, after the
+	# target checkpoint has loaded. extract-nvrtc-header.sh installs it with the same
+	# checks; this rejects stale or hand-made state.
+	test -s "$OVERLAY_DIR/nvrtc.h" || { echo "SPEC_METHOD=dflash needs a non-empty $OVERLAY_DIR/nvrtc.h (scripts/extract-nvrtc-header.sh)" >&2; exit 2; }
+	grep -q nvrtcResult "$OVERLAY_DIR/nvrtc.h" || { echo "$OVERLAY_DIR/nvrtc.h does not look like the CUDA NVRTC header; re-extract it" >&2; exit 2; }
 	OPT+=(--speculative-config "{\"method\":\"dflash\",\"model\":\"${DFLASH2_MNT}\",\"num_speculative_tokens\":${DFLASH_TOKENS}}")
 	;;
 none) ;;
@@ -195,10 +215,9 @@ MOUNTS=(
 # FlashInfer JIT-builds the cutlass fused-MoE kernels at warmup and includes <nvrtc.h>,
 # which ships only in the pip nvidia cu13 wheel. Mount that ONE header into nvcc's include
 # dir -- putting the whole wheel dir on CPATH shadows the CUDA runtime headers and breaks
-# nvcc's generated stubs with "__cudaLaunch was not declared in this scope".
-if [ -f "$OVERLAY_DIR/nvrtc.h" ]; then
-	MOUNTS+=(-v "$OVERLAY_DIR/nvrtc.h:/usr/local/cuda/include/nvrtc.h:ro")
-fi
+# nvcc's generated stubs with "__cudaLaunch was not declared in this scope". DFlash mounts
+# it unconditionally; the dflash branch above has already verified it is present and real.
+[ "$SPEC_METHOD" = "dflash" ] && MOUNTS+=(-v "$OVERLAY_DIR/nvrtc.h:/usr/local/cuda/include/nvrtc.h:ro")
 INDEXER_REL="vllm/model_executor/layers/sparse_attn_indexer_kpool.py"
 if [ -f "$OVERLAY_DIR/$INDEXER_REL" ]; then
 	MOUNTS+=(-v "$OVERLAY_DIR/$INDEXER_REL:$VLLM/model_executor/layers/sparse_attn_indexer_kpool.py:ro")
